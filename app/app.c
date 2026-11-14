@@ -11,6 +11,7 @@
  * for now: saving to a sound slot comes later (docs/PLAN.md).
  * Part of the unity build (device/unity.c, host/plat_host.c), after the platform: gfx.c and announce.c are in
  * scope. */
+#define MIRAGE_FASTMATH   /* as the o2 units (fm1.toml o2_cflags): fm1-base's fastmath.h, no libm */
 #include "mirage.h"
 #include "mirage_engine.h"
 #include "packed_disk.h"

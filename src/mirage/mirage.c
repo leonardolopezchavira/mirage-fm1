@@ -2,7 +2,6 @@
  * The Mirage's main board: the memory map, the I/O wiring and the analog section. A C port of mirage-remake's
  * Mirage.cpp (MIT); memory map after MAME's enmirage.cpp (BSD-3-Clause, R. Belmont, tim lindner). */
 #include "mirage.h"
-#include <string.h>
 #include "mirage_math.h"
 
 struct mirage_machine;
@@ -243,10 +242,10 @@ mirage_t *mirage_init(void *mem, const uint8_t *rom, uint8_t *sram)
     static const mreal kDetune[8] = {MR(0.7), MR(-1.1), MR(0.3), MR(1.6), MR(-0.4), MR(-1.8), MR(1.0), MR(-0.2)};
     struct mirage_machine *m = (struct mirage_machine *)mem;
     int i;
-    memset(m, 0, sizeof *m);
+    m_zero(m, sizeof *m);
     m->rom = rom;
     m->sram = sram;
-    memset(sram, 0x7F, MIRAGE_SRAM_BYTES);
+    m_fill(sram, 0x7F, MIRAGE_SRAM_BYTES);
     via_init(&m->via);
     acia_reset(&m->acia);
     fdc_init(&m->fdc);
@@ -354,7 +353,7 @@ uint16_t mirage_pc(const mirage_t *m) { return m->cpu.pc; }
 uint8_t *mirage_main_ram(mirage_t *m) { return m->ram; }
 uint8_t *mirage_sample_ram(mirage_t *m) { return m->sram; }
 
-void mirage_snapshot_save(const mirage_t *m, void *dst) { memcpy(dst, m, sizeof *m); }
+void mirage_snapshot_save(const mirage_t *m, void *dst) { m_copy(dst, m, sizeof *m); }
 
 void mirage_snapshot_load(mirage_t *m, const void *src)
 {
@@ -364,7 +363,7 @@ void mirage_snapshot_load(mirage_t *m, const void *src)
     void (*tx)(void *, uint8_t) = m->acia.on_tx;
     void *tx_ctx = m->acia.tx_ctx;
     int i;
-    memcpy(m, src, sizeof *m);
+    m_copy(m, src, sizeof *m);
     m->rom = rom;
     m->sram = sram;
     m->doc.ram = sram;

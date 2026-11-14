@@ -1,10 +1,14 @@
 /* SPDX-License-Identifier: MIT
- * The analog models' number type and maths, in one place:
+ * What the core needs from the C library, in one place. The FM-1's toolchain has no libc headers but <stddef.h> and
+ * <stdint.h>: memory is cleared and copied by hand here (no <string.h> anywhere in src/mirage), and the maths come
+ * from fm1-base's fastmath.h there. The analog models' number type and maths:
  *   default            float with libm (desktop tools, host simulator)
  *   MIRAGE_FASTMATH    float with fm1-base's fastmath.h (the FM-1: no libm, single-precision FPU only)
  *   MIRAGE_DOUBLE      double with libm: the same arithmetic as mirage-remake, for the oracle tests
  * The digital parts (6809, VIA, ACIA, WD1772, DOC) are integer and identical in every build. */
 #pragma once
+#include <stddef.h>
+#include <stdint.h>
 
 #if defined(MIRAGE_DOUBLE)
 #include <math.h>
@@ -58,4 +62,31 @@ static inline long m_lroundf(float x)
 #else
     return lroundf(x);
 #endif
+}
+
+static inline void m_zero(void *p, size_t n)
+{
+    unsigned char *d = (unsigned char *)p;
+    while (n--) *d++ = 0;
+}
+
+static inline void m_fill(void *p, unsigned char v, size_t n)
+{
+    unsigned char *d = (unsigned char *)p;
+    while (n--) *d++ = v;
+}
+
+static inline void m_copy(void *dst, const void *src, size_t n)
+{
+    unsigned char *d = (unsigned char *)dst;
+    const unsigned char *s = (const unsigned char *)src;
+    while (n--) *d++ = *s++;
+}
+
+static inline int m_same(const void *a, const void *b, size_t n)   /* 1 when equal */
+{
+    const unsigned char *x = (const unsigned char *)a, *y = (const unsigned char *)b;
+    while (n--)
+        if (*x++ != *y++) return 0;
+    return 1;
 }

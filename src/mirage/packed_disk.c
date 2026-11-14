@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: MIT
  * The packed disk's decoder (packed_disk.h has the format). */
 #include "packed_disk.h"
-#include <string.h>
+#include "mirage_math.h"
 
 #define BLOCK 256
 
@@ -38,7 +38,7 @@ int packed_disk_track(const uint8_t *pack, uint32_t pack_bytes, int t, uint8_t *
     uint32_t o0, o1;
     bitrd_t b;
     int blk, i, p1 = 0x80, p2 = 0x80;
-    if (!pack || pack_bytes < PACKED_HEADER_BYTES || memcmp(pack, "MRD1", 4) != 0 || t < 0 || t >= MIRAGE_TRACKS)
+    if (!pack || pack_bytes < PACKED_HEADER_BYTES || !m_same(pack, "MRD1", 4) || t < 0 || t >= MIRAGE_TRACKS)
         return -1;
     o0 = le32(pack + 4 + 4 * (uint32_t)t);
     o1 = le32(pack + 8 + 4 * (uint32_t)t);
@@ -82,7 +82,7 @@ static int packed_read(void *ctx, uint32_t off, uint8_t *dst, uint32_t n)
             if (packed_disk_track(d->pack, d->pack_bytes, t, d->cache) != 0) { d->cached = -1; return 1; }
             d->cached = t;
         }
-        memcpy(dst, d->cache + in, k);
+        m_copy(dst, d->cache + in, k);
         dst += k;
         off += k;
         n -= k;
@@ -92,7 +92,7 @@ static int packed_read(void *ctx, uint32_t off, uint8_t *dst, uint32_t n)
 
 int packed_disk_init(packed_disk_t *d, const uint8_t *pack, uint32_t pack_bytes)
 {
-    if (!pack || pack_bytes < PACKED_HEADER_BYTES || memcmp(pack, "MRD1", 4) != 0) return -1;
+    if (!pack || pack_bytes < PACKED_HEADER_BYTES || !m_same(pack, "MRD1", 4)) return -1;
     d->pack = pack;
     d->pack_bytes = pack_bytes;
     d->cached = -1;

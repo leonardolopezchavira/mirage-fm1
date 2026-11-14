@@ -5,8 +5,8 @@
  * desktop, a virtual disk in flash on the FM-1, or a drive served by a web page over USB. */
 #pragma once
 #include <stdint.h>
-#include <string.h>
 #include "mirage.h"
+#include "mirage_math.h"
 
 enum { ST_BUSY = 0x01, ST_DRQ = 0x02, ST_TR00 = 0x04, ST_RNF = 0x10, ST_SPINUP = 0x20, ST_WP = 0x40, ST_MOTOR = 0x80 };
 enum { FDC_NONE, FDC_SEEK, FDC_READ, FDC_WRITE, FDC_READADDR, FDC_READTRACK, FDC_WRITETRACK };
@@ -29,7 +29,7 @@ static int fdc_sector_len(int s) { return s < 5 ? 1024 : 512; }
 
 static void fdc_init(wd1772_t *f)
 {
-    memset(f, 0, sizeof *f);
+    m_zero(f, sizeof *f);
     f->byte_cycles = 32;
     f->type1 = 1;
 }
@@ -44,7 +44,7 @@ static void fdc_reset(wd1772_t *f)
 
 static void fdc_disk_read(wd1772_t *f, uint32_t off, uint8_t *dst, uint32_t n)
 {
-    if (!f->disk || f->disk->read(f->disk->ctx, off, dst, n) != 0) memset(dst, 0, n);
+    if (!f->disk || f->disk->read(f->disk->ctx, off, dst, n) != 0) m_zero(dst, n);
 }
 
 static void fdc_disk_write(wd1772_t *f, uint32_t off, const uint8_t *src, uint32_t n)
