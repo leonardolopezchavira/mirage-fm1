@@ -15,7 +15,7 @@ the short version that lives with the code.
 
 | # | Phase | Done when | State |
 | --- | --- | --- | --- |
-| 0 | Scaffold: fm1-base, fm1.toml, licences, CI, host simulator | an app builds, installs and boots on the FM-1 | **built**; on hardware: to test |
+| 0 | Scaffold: fm1-base, fm1.toml, licences, CI, host simulator | an app builds, installs and boots on the FM-1 | **builds** (CI's `packages` artifact); on hardware: to test |
 | 1 | C core: src/emu in C99, no allocation, float on the FM-1 | bit-exact with mirage-remake (double build) | **done**: `tests/oracle.cpp` |
 | 2 | Performance on the FM-1: both cores measured | the filter rate and core split fixed | next |
 | 3 | Storage: sound slots, virtual disk, boot snapshot, instant disk | LOAD and SAVE from flash; boot under 1 s | |
@@ -32,6 +32,10 @@ the short version that lives with the code.
   decodes the one track the OS asks for.
 - Every one of the disk's 80 tracks is read: tracks 0-1 are the OS; boot reads 0-27 (the OS, lower 1 and upper 1);
   tracks 32-34 are read by every load; lower 2, lower 3, upper 2 and upper 3 take the rest.
+- The firmware (0.1.0, CI build): image 493,308 bytes of the 581 KB app slot (the OS 3.2 pack is 253 KB of it), RAM
+  75.9 of 96 KB, pool 288 of 336 KB; no soft-double routines, no 64-bit multiply beside a load. About 88 KB of the
+  app slot is left: the effects and the sequencer (phase 6) may not fit beside the pack, so phase 3 decides whether
+  the pack moves to the data flash.
 - On a desktop x86 core the single-precision build runs 18x real time. The FM-1's figure is phase 2's first job: the
   play screen shows `plat_cpu_pct()`.
 
