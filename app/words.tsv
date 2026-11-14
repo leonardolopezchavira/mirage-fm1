@@ -1,0 +1,9 @@
+# SPDX-License-Identifier: MIT
+# Mirage's words for a screen reader (fm1-reader): the text on the screen <TAB> what to say.
+# url: https://leonardolopezchavira.github.io/mirage-fm1/words/
+MIRAGE	mirage
+DISK	disk
+KEYPAD	keypad
+K1 PARAM	knob 1, parameter
+K2 VALUE	knob 2, value
+EDIT KEYPAD   HOME CANCEL	edit, keypad. home, cancel

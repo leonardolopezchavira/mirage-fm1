@@ -1,0 +1,22 @@
+# Mirage for the FM-1: build settings (fm1-base tools/build.py)
+name = "MIRAGE"
+id_prefix = "FM-1_84"           # package identity: dev FM-1_8400, releases FM-1_84XXYYZZ
+usb_manufacturer = "mirage-fm1"
+usb_product = "MIRAGE FM-1"
+# the emulator, at -O2 (app/mirage links to ../src/mirage), on fm1-base's fastmath.h in place of libm
+o2 = ["mirage/mirage.c", "mirage/mirage_engine.c", "mirage/packed_disk.c"]
+o2_cflags = ["-DMIRAGE_FASTMATH"]
+include = ["mirage", "data"]
+words = "words.tsv"
+ble = true                      # Bluetooth MIDI in
+# the site and firmware.json
+tagline = "an Ensoniq Mirage for the FM-1, running Ensoniq's own OS"
+repo = "https://github.com/leonardolopezchavira/mirage-fm1"
+licence = "MIT"                 # GPL-3.0-only once the effects and the sequencer come in (LICENSING.md)
+credits = "Built on fm1-base (MPL-2.0). The emulator is a C port of mirage-remake's (MIT), after MAME's enmirage and es5503 (BSD-3-Clause). The Mirage's boot ROM and OS 3.2 disk are Ensoniq's."
+author = "Leonardo Lopez Chavira"
+description = "An unofficial Ensoniq Mirage sampler for the FM-1. It emulates the Mirage's hardware (the 6809, the ES5503 DOC, the eight CEM3328 filters, the floppy drive) and runs Ensoniq's own boot ROM and OS 3.2, with OS 3.2's piano, voices and strings built in."
+tags = ["synth"]
+install = "https://leonardolopezchavira.github.io/mirage-fm1/install/"
+site = "https://leonardolopezchavira.github.io/mirage-fm1/"
+screenshot = "docs/img/play.png"

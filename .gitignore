@@ -1,0 +1,8 @@
+build/
+app/build/
+app/web/
+__pycache__/
+*.wav
+*.pack
+*.out
+.DS_Store

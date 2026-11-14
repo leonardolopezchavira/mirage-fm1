@@ -1,0 +1,63 @@
+# Mirage in the host simulator: python3 fm1/base/tools/build.py app --host, then
+#   app/build/host/mirage_host app/tests/basic.txt app/build/host
+# power-on: the boot ROM tunes the filters and loads OS 3.2 and the first sounds from the built-in disk
+wait 9000
+expect booted 1
+expect motor 0
+shot boot.png
+# a key plays: F3 + 7 semitones = C4
+wav note.wav
+key 7 down 100
+wait 600
+key 7 up
+wait 300
+wavstop
+expect peak_db_min -30
+# a chord over MIDI, as from a keyboard
+midi 90 30 64
+midi 90 34 64
+midi 90 37 64
+wait 500
+shot chord.png
+midi 80 30 00
+midi 80 34 00
+midi 80 37 00
+wait 300
+# K1 picks parameter 38 (filter cutoff); when it rests, PARAM 3 8 VALUE goes to the Mirage, then K2 steps it down
+turn K1 27
+wait 1500
+expect seg0 63
+turn K2 -2
+wait 800
+expect seg0 63
+expect seg1 191
+tap HOME
+wait 400
+expect seg0 207
+expect seg1 127
+# EDIT: the keys are the keypad; PAR (white key 11: key 18), 4 (white key 4: key 6), 1 (white key 1: key 0): "4.1"
+tap EDIT
+wait 30
+expect keypad 1
+shot keypad.png
+key 18 down
+wait 120
+key 18 up
+wait 200
+key 6 down
+wait 120
+key 6 up
+wait 200
+key 0 down
+wait 120
+key 0 up
+wait 300
+expect seg0 230
+expect seg1 6
+tap EDIT
+wait 30
+expect keypad 0
+# octaves
+tap OCT+
+wait 30
+expect octave 1

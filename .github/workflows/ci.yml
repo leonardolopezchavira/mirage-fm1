@@ -1,0 +1,46 @@
+# The core on the desktop (with the oracle against mirage-remake) and the app in fm1-base's host simulator.
+name: ci
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+env:
+  MIRAGE_REMAKE_COMMIT: 07367e4050b4ca667a29cb308d09ab50fcc475e1   # the emulator src/mirage was ported from
+
+jobs:
+  desktop:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: mirage-remake, for the oracle
+        run: |
+          git init -q remake && cd remake
+          git remote add origin https://github.com/leonardolopezchavira/mirage-remake
+          git fetch -q --depth 1 origin "$MIRAGE_REMAKE_COMMIT" && git checkout -q FETCH_HEAD
+      - name: Build
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DMIRAGE_REMAKE_DIR="$PWD/remake" && cmake --build build -j
+      - name: Tests (the core, the packed disk, the oracle)
+        run: ctest --test-dir build --output-on-failure
+      - name: The built-in disk header is the pack of the image
+        run: |
+          python3 tools/pack_disk.py data/disks/os32.img /tmp/os32.pack --header /tmp/os32_disk.h --name os32_disk
+          diff -q /tmp/os32_disk.h app/data/os32_disk.h
+
+  simulator:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Pillow (fm1-base's fonts)
+        run: python3 -m pip install Pillow
+      - name: Mirage in fm1-base's host simulator
+        run: |
+          python3 fm1/base/tools/build.py app --host
+          app/build/host/mirage_host app/tests/basic.txt app/build/host
+      - uses: actions/upload-artifact@v4
+        with:
+          name: simulator-screens
+          path: app/build/host/*.png

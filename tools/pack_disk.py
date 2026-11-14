@@ -1,0 +1,159 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+"""Packs a Mirage disk image (450,560 bytes) for the firmware, each track on its own so the FM-1 decodes only the
+track the OS asks for (src/mirage/packed_disk.c is the decoder; the format is described there).
+
+    tools/pack_disk.py IMAGE.img OUT.pack [--header OUT.h --name NAME]
+
+A track is 22 blocks of 256 bytes. Each block picks the predictor that codes it smallest (none, the last byte, or
+the line through the last two), Rice-codes the zigzagged residuals with the best k, or is stored raw. Sampled sound
+compresses well this way (OS 3.2's disk: 450 KB to about 247 KB); the decoder is a few dozen lines."""
+import argparse
+import struct
+import sys
+
+TRACKS, TRACK_BYTES, BLOCK = 80, 5632, 256
+MAGIC = b"MRD1"
+
+
+class Bits:
+    def __init__(self):
+        self.out = bytearray()
+        self.acc = 0
+        self.n = 0
+
+    def put(self, v, n):            # n bits of v, most significant first
+        for i in range(n - 1, -1, -1):
+            self.acc = (self.acc << 1) | ((v >> i) & 1)
+            self.n += 1
+            if self.n == 8:
+                self.out.append(self.acc)
+                self.acc = self.n = 0
+
+    def flush(self):
+        if self.n:
+            self.out.append(self.acc << (8 - self.n))
+            self.acc = self.n = 0
+        return bytes(self.out)
+
+
+def zigzag(v):
+    v = ((v + 128) & 0xFF) - 128
+    return 2 * v if v >= 0 else -2 * v - 1
+
+
+def residuals(blk, mode, p1, p2):
+    vals = []
+    for x in blk:
+        pred = 0 if mode == 0 else p1 if mode == 1 else 2 * p1 - p2
+        vals.append(zigzag(x - pred))
+        p2, p1 = p1, x
+    return vals
+
+
+def pack_track(tr):
+    b = Bits()
+    p1 = p2 = 0x80
+    for o in range(0, TRACK_BYTES, BLOCK):
+        blk = tr[o:o + BLOCK]
+        best = (8 * BLOCK, None, None, None)              # raw
+        for mode in (0, 1, 2):
+            vals = residuals(blk, mode, p1, p2)
+            for k in range(8):
+                c = sum((v >> k) + 1 + k for v in vals)
+                if c < best[0]:
+                    best = (c, mode, k, vals)
+        _, mode, k, vals = best
+        if mode is None:
+            b.put(0x80, 8)
+            for x in blk:
+                b.put(x, 8)
+        else:
+            b.put((mode << 4) | k, 8)
+            for v in vals:
+                q = v >> k
+                b.put(0, q)                                 # q zeros, a one, then k bits
+                b.put(1, 1)
+                b.put(v & ((1 << k) - 1), k)
+        p2, p1 = blk[-2], blk[-1]
+    return b.flush()
+
+
+def unpack_track(data):                                     # the decoder, for the self-check
+    pos = [0, 0]                                            # byte, bit
+
+    def bit():
+        v = (data[pos[0]] >> (7 - pos[1])) & 1
+        pos[1] += 1
+        if pos[1] == 8:
+            pos[0] += 1
+            pos[1] = 0
+        return v
+
+    def bits(n):
+        v = 0
+        for _ in range(n):
+            v = (v << 1) | bit()
+        return v
+
+    out = bytearray()
+    p1 = p2 = 0x80
+    for _ in range(TRACK_BYTES // BLOCK):
+        h = bits(8)
+        for _ in range(BLOCK):
+            if h & 0x80:
+                x = bits(8)
+            else:
+                k, mode = h & 7, (h >> 4) & 3
+                q = 0
+                while not bit():
+                    q += 1
+                v = (q << k) | bits(k)
+                r = (v >> 1) ^ -(v & 1)
+                pred = 0 if mode == 0 else p1 if mode == 1 else 2 * p1 - p2
+                x = (pred + r) & 0xFF
+            out.append(x)
+            p2, p1 = p1, x
+    return bytes(out)
+
+
+def pack(image):
+    tracks = [pack_track(image[t * TRACK_BYTES:(t + 1) * TRACK_BYTES]) for t in range(TRACKS)]
+    offs, o = [], 0
+    for t in tracks:
+        offs.append(o)
+        o += len(t)
+    offs.append(o)
+    head = MAGIC + struct.pack("<%dI" % (TRACKS + 1), *offs)
+    return head + b"".join(tracks), tracks
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("image")
+    ap.add_argument("out")
+    ap.add_argument("--header", help="also write a C header with the pack as a const array")
+    ap.add_argument("--name", default="disk_pack")
+    a = ap.parse_args()
+    image = open(a.image, "rb").read()
+    if len(image) != TRACKS * TRACK_BYTES:
+        sys.exit(f"{a.image}: {len(image)} bytes, not a Mirage disk image ({TRACKS * TRACK_BYTES})")
+    data, tracks = pack(image)
+    for t, d in enumerate(tracks):
+        if unpack_track(d) != image[t * TRACK_BYTES:(t + 1) * TRACK_BYTES]:
+            sys.exit(f"track {t}: the decoder does not give it back")
+    open(a.out, "wb").write(data)
+    print(f"{a.image}: {len(image)} -> {len(data)} bytes ({100 * len(data) / len(image):.1f} %)")
+    if a.header:
+        with open(a.header, "w") as f:
+            f.write(f"/* Generated by tools/pack_disk.py from {a.image.split('/')[-1]}: do not edit.\n"
+                    " * Ensoniq material: see LICENSE.md (no licence is granted for it). */\n#pragma once\n#include <stdint.h>\n\n")
+            f.write(f"#define {a.name.upper()}_BYTES {len(data)}u\n")
+            f.write(f"static const uint8_t {a.name}[{len(data)}] = {{\n")
+            for i in range(0, len(data), 24):
+                f.write("    " + ",".join(str(x) for x in data[i:i + 24]) + ",\n")
+            f.write("};\n")
+
+
+if __name__ == "__main__":
+    main()
