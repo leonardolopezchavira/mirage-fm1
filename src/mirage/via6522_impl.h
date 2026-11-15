@@ -114,6 +114,14 @@ static void via_write(VIA_HOST *h, int reg, uint8_t v)
 static void via_tick(via6522_t *v, int cycles)
 {
     v->t1 -= cycles;   /* timer 1 */
+    if (v->t1 < 0 && (v->acr & 0x40)) {
+        /* free-running: every underflow reloads the same period, so they are counted at once (the OS can leave the
+         * latch at 0, an underflow every 2 cycles) */
+        const int32_t p = (int32_t)v->t1latch + 2, n = (-v->t1 + p - 1) / p;
+        if (v->t1armed) v->ifr |= IFR_T1;
+        v->t1 += n * p;
+        if ((v->acr & 0x80) && (n & 1)) v->pb7 = (uint8_t)!v->pb7;
+    }
     while (v->t1 < 0) {
         if (v->t1armed) {
             v->ifr |= IFR_T1;

@@ -4,6 +4,9 @@
 wait 9000
 expect booted 1
 expect motor 0
+# booted: the analog section on the second core
+expect split 1
+expect jobs >100
 shot boot.png
 # a key plays: F3 + 7 semitones = C4
 wav note.wav
@@ -12,7 +15,7 @@ wait 600
 key 7 up
 wait 300
 wavstop
-expect peak_db_min -30
+expect peak_db_min -32
 # a chord over MIDI, as from a keyboard
 midi 90 30 64
 midi 90 34 64

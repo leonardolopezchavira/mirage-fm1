@@ -14,7 +14,7 @@
   "hardware": {
     "models": ["FM-1"],
     "flash": ["856014", "B36014"],
-    "features": ["bluetooth-midi", "usb-audio-in", "usb-audio-out", "velocity", "pressure", "screen-reader"]
+    "features": ["bluetooth-midi", "usb-audio-in", "usb-audio-out", "second-core", "velocity", "pressure", "screen-reader"]
   },
   "credits": "Built on fm1-base (MPL-2.0). The emulator is a C port of mirage-remake's (MIT), after MAME's enmirage and es5503 (BSD-3-Clause). The Mirage's boot ROM and OS 3.2 disk are Ensoniq's."
 }

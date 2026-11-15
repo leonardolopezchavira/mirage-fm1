@@ -176,7 +176,7 @@ static uint8_t rmw(CPU_HOST *h, int op, uint8_t v)
     return r;
 }
 
-static int cpu_cond(CPU_HOST *h, int c)
+static inline int cpu_cond(CPU_HOST *h, int c)
 {
     const int C = (CPU->cc & CC_C) != 0, Z = (CPU->cc & CC_Z) != 0, N = (CPU->cc & CC_N) != 0, V = (CPU->cc & CC_V) != 0;
     switch (c & 0xF) {
@@ -247,7 +247,7 @@ static uint16_t ea_indexed(CPU_HOST *h)
     return ea;
 }
 
-static uint16_t ea_mode(CPU_HOST *h, int mode)   /* 1 direct, 2 indexed, 3 extended */
+static inline uint16_t ea_mode(CPU_HOST *h, int mode)   /* 1 direct, 2 indexed, 3 extended */
 {
     switch (mode) {
     case 1: return ea_direct(h);
@@ -340,9 +340,10 @@ static void push_all(CPU_HOST *h)
     cpu_push_s(h, CPU->cc);
 }
 
-static int take_interrupts(CPU_HOST *h)
+static inline int take_interrupts(CPU_HOST *h)
 {
     int cyc;
+    if (!(CPU->nmi_pending | CPU->firq | CPU->irq)) return 0;   /* (most instructions: no line up) */
     if (CPU->nmi_pending && CPU->nmi_armed) {
         CPU->nmi_pending = 0;
         cyc = 19;
@@ -657,6 +658,7 @@ static int cpu_step(CPU_HOST *h)
 {
     int cyc;
     uint8_t op;
+    if (!(CPU->sync | CPU->cwai | CPU->nmi_pending | CPU->firq | CPU->irq)) goto run;   /* (most instructions) */
     if (CPU->sync) {   /* SYNC: wait for any interrupt line; a masked one just resumes */
         if (CPU->nmi_pending || CPU->firq || CPU->irq) {
             CPU->sync = 0;
@@ -666,6 +668,7 @@ static int cpu_step(CPU_HOST *h)
     if ((cyc = take_interrupts(h))) { CPU->total += (uint64_t)cyc; return cyc; }
     if (CPU->cwai) { CPU->total += 1u; return 1; }
 
+run:
     CPU->extra = 0;
     op = cpu_fetch(h);
     if (op == 0x10) cyc = exec10(h, cpu_fetch(h));

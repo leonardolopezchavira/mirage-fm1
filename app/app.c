@@ -32,6 +32,22 @@ static packed_disk_t disk PLAT_POOL;
 static mirage_t *mx;
 static volatile uint8_t ok;        /* the machine is up */
 
+/* the second core: it plays the last block's record through the filters (mirage_engine_job) while this one runs the
+ * machine; how long it took, in plat_ticks24 ticks, for the load shown */
+static uint8_t two_cores;
+static volatile uint32_t c1_ticks;
+static void core2_job(uint32_t arg)
+{
+    const uint32_t t0 = plat_ticks24();
+    (void)arg;
+    mirage_engine_job(&eng);
+    c1_ticks = plat_ticks24() - t0;
+}
+static int core2_start(void *ctx) { (void)ctx; return plat_cpu2_on() && plat_cpu2_run(core2_job, 0); }
+static int core2_wait(void *ctx) { (void)ctx; return plat_cpu2_wait(); }
+static const mirage_core2_t core2 = {core2_start, core2_wait, 0};
+static volatile uint16_t load_c0, load_c1;   /* this core's render and the second core's job, in % of a block (x10) */
+
 /* the main loop's MIDI bytes and panel keys, for the audio interrupt: a byte ring and a held-key mask */
 #define RING 256u
 static uint8_t ring[RING];
@@ -86,7 +102,12 @@ void app_render(int32_t *lr, uint32_t n, uint32_t master_q12)
     }
     while (done < n) {
         const uint32_t k = n - done < APP_BLOCK ? n - done : APP_BLOCK;
+        const uint32_t t0 = plat_ticks24(), budget = k * (PLAT_TICKS_PER_US * 1000000u / 44118u);
+        c1_ticks = 0;
         mirage_engine_process(&eng, mono, (int)k, 0);
+        /* the loads, smoothed over about 16 blocks */
+        load_c0 = (uint16_t)((load_c0 * 15u + (plat_ticks24() - t0) * 1000u / budget + 8u) / 16u);
+        load_c1 = (uint16_t)((load_c1 * 15u + c1_ticks * 1000u / budget + 8u) / 16u);
         for (i = 0; i < k; i++) {
             float v;
             gain_now += (gain - gain_now) * 0.004f;   /* MASTER glides: no click at a block's edge */
@@ -122,6 +143,8 @@ void app_init(void)
     mirage_insert_disk(mx, &disk.disk);
     mirage_engine_init(&eng, mx, 44117.647f);   /* the FM-1's rate: 24 MHz / 544 */
     eng.disk_turbo = DISK_TURBO;
+    two_cores = plat_cpu2_set(1) == 0;
+    if (two_cores) mirage_engine_set_core2(&eng, &core2);
     ok = 1;                                      /* the OS boots in the render, as at power-on */
 }
 
@@ -197,6 +220,23 @@ static void int_text(int32_t v, char *b)
     if (v < 0) *b++ = '-';
     while (n) *b++ = t[--n];
     *b = 0;
+}
+
+/* the loads: "C0 54 C1 31" (the second core's only while it plays: "1C" when the machine is on one core) */
+static void load_text(char *t)
+{
+    char n[12];
+    t[0] = 0;
+    text_cat(t, "C0 ");
+    int_text((load_c0 + 5) / 10, n);
+    text_cat(t, n);
+    if (two_cores && plat_cpu2_on() && eng.split) {
+        text_cat(t, " C1 ");
+        int_text((load_c1 + 5) / 10, n);
+        text_cat(t, n);
+    } else {
+        text_cat(t, two_cores && plat_cpu2_on() ? " 1C" : " ONE");
+    }
 }
 
 static char seg_char(uint8_t s)
@@ -389,9 +429,8 @@ static void draw(void)
         int32_t x = cv_text(10, 6, &FONT_B, APP_NAME, C_WHITE);
         x = cv_text(x + 10, 10, &FONT_XS, "DISK", motor_on ? RGB(255, 60, 40) : C_DIM);
         if (FM1B_BLE) cv_text(x + 8, 10, &FONT_XS, "BLE", plat_ble_connected() ? C_HI : C_DIM);
-        int_text((int32_t)plat_cpu_pct(), t);
-        text_cat(t, "%");
-        cv_text(230 - text_w(&FONT_XS, t), 10, &FONT_XS, t, C_GRAY);
+        load_text(t);
+        cv_text(230 - text_w(&FONT_XS, t), 10, &FONT_XS, t, plat_xruns() ? RGB(255, 60, 40) : C_GRAY);
     }
     cv_blit(0, 0);
     /* the display */
@@ -452,7 +491,8 @@ void app_frame(void)
             if (diff > 24 || diff < -24) { ui.seen_lvl[d][s] = seg_lvl[d][s]; ui.redraw = 1; }
         }
     }
-    if (motor_on != ui.seen_motor || cpu / 5u != ui.seen_cpu / 5u || (ui.msg_until && now >= ui.msg_until)) {
+    cpu = (uint32_t)load_c0 + (uint32_t)load_c1 * 1000u + (eng.split ? 1000000u : 0u) + plat_xruns() * 3u;
+    if (motor_on != ui.seen_motor || cpu / 20u != ui.seen_cpu / 20u || (ui.msg_until && now >= ui.msg_until)) {
         ui.seen_motor = motor_on;
         ui.seen_cpu = cpu;
         if (now >= ui.msg_until) ui.msg_until = 0;
@@ -473,6 +513,8 @@ int app_expect(const char *what, int *got)
     else if (!strcmp(what, "octave")) *got = ui.octave;
     else if (!strcmp(what, "keypad")) *got = ui.keypad;
     else if (!strcmp(what, "booted")) *got = ok && mx && mirage_cycles(mx) > 5u * MIRAGE_CPU_HZ && !motor_on;
+    else if (!strcmp(what, "split")) *got = eng.split;
+    else if (!strcmp(what, "jobs")) *got = (int)eng.jobs;
     else return 0;
     return 1;
 }

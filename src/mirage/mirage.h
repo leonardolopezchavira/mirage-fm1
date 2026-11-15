@@ -15,8 +15,22 @@ extern "C" {
 #endif
 
 #define MIRAGE_CPU_HZ 2000000
-#define MIRAGE_ANALOG_DIV 16                                  /* the analog section runs every 16 CPU cycles */
-#define MIRAGE_ANALOG_HZ (MIRAGE_CPU_HZ / MIRAGE_ANALOG_DIV)  /* 125 kHz */
+/* Two builds of the analog section (the digital parts are the same in both):
+ *   exact (MIRAGE_DOUBLE): mirage-remake's arithmetic at its 125 kHz, sample for sample (the oracle checks it)
+ *   fast (the default, the FM-1): 62.5 kHz, the filters' arithmetic rearranged (no division per sample), one noise
+ *        draw per step. The DOC's outputs change at its frame rate (29.4 kHz with 32 oscillators), so 62.5 kHz still
+ *        holds each of them twice; the filters stay below 0.45 of it (28 kHz) and the ROM's tuning still finds them. */
+#if defined(MIRAGE_DOUBLE) && !defined(MIRAGE_FAST)
+#define MIRAGE_EXACT 1
+#endif
+#ifndef MIRAGE_ANALOG_DIV
+#ifdef MIRAGE_EXACT
+#define MIRAGE_ANALOG_DIV 16                                  /* every 16 CPU cycles: 125 kHz */
+#else
+#define MIRAGE_ANALOG_DIV 32                                  /* every 32: 62.5 kHz */
+#endif
+#endif
+#define MIRAGE_ANALOG_HZ (MIRAGE_CPU_HZ / MIRAGE_ANALOG_DIV)
 #define MIRAGE_ROM_BYTES 4096u
 #define MIRAGE_SRAM_BYTES (128u * 1024u)
 #define MIRAGE_RAM_BYTES 0x6000u                              /* $8000-$DFFF */
@@ -72,9 +86,39 @@ void mirage_set_write_protect(mirage_t *m, int on);
 uint8_t mirage_display(const mirage_t *m, int digit);
 float mirage_segment_level(const mirage_t *m, int digit, int seg);
 
+/* Two cores. In split mode the machine leaves the analog section alone: a render records, for each analog step,
+ * what reaches the filters (the DOC's channel outputs when a frame changes them, and every write to the filters'
+ * DACs), and mirage_analog_run plays that record through the filters, on another core, while the machine goes on
+ * with the next block. The record of a block is a mirage_stream_t. The filters' output is not there for the A/D
+ * converter in split mode: the ROM's filter tuning and sampling need the machine in step with its filters (split
+ * off); mirage_adc_stale counts the A/D reads of the audio made in split mode, so the caller can tell. */
+#define MIRAGE_STREAM_STEPS 400   /* analog steps in a record: a 256-frame block at 44.1 kHz needs 363 */
+#define MIRAGE_STREAM_DACS 384    /* filter DAC writes in a record (more are folded into the last values) */
+typedef struct {
+    uint16_t steps;               /* analog steps recorded */
+    uint16_t nframes, ndac;
+    uint8_t codes[16];            /* the filters' cutoff (0-7) and resonance (8-15) DAC values at the start */
+    uint16_t frame_step[MIRAGE_STREAM_STEPS];   /* the DOC's outputs changed before this step... */
+    int32_t frame_chan[MIRAGE_STREAM_STEPS][8]; /* ...to these */
+    uint16_t dac_step[MIRAGE_STREAM_DACS];      /* a DAC write before this step: */
+    uint8_t dac_ch[MIRAGE_STREAM_DACS];         /* the channel, | 0x10 for the resonance, | 0x20 for the cutoff */
+    uint8_t dac_val[MIRAGE_STREAM_DACS];
+} mirage_stream_t;
+
+void mirage_set_split(mirage_t *m, int on);
+/* split mode: run the machine until s holds at least n analog steps (it may hold one or two more); returns them */
+int mirage_render_split(mirage_t *m, mirage_stream_t *s, int n);
+/* the filters over a record: s->steps samples into out (the other core; nothing else touches the filters then) */
+void mirage_analog_run(mirage_t *m, const mirage_stream_t *s, float *out);
+uint32_t mirage_adc_stale(const mirage_t *m);
+/* the analog samples a lockstep render made past its end (for the next render): taken out, or put back */
+int mirage_take_pending(mirage_t *m, float *dst, int max);
+void mirage_put_pending(mirage_t *m, const float *src, int n);
+
 int mirage_sampling(const mirage_t *m);               /* the OS is sampling (VIA timer 1 paces the A/D) */
 float mirage_take_input_level(mirage_t *m);           /* the input's peak at the A/D path since the last call */
 
+int mirage_doc_oscillators(const mirage_t *m);       /* the DOC's enabled oscillators (its frame rate follows) */
 uint64_t mirage_cycles(const mirage_t *m);
 uint16_t mirage_pc(const mirage_t *m);
 uint8_t *mirage_main_ram(mirage_t *m);                /* $8000-$DFFF, MIRAGE_RAM_BYTES */

@@ -21,6 +21,7 @@ typedef struct {
     mreal fs, detune;
     uint8_t cut, res, dirty;
     mreal k, G, G2, G3, G4, a;
+    mreal aG, aG2, aG3, inv;   /* the fast build's: a x G^n, and 1 / (1 + k G^4) */
     mreal s1, s2, s3, s4, y;
 } cem3328_t;
 
@@ -51,6 +52,9 @@ static inline void vcf_reset(cem3328_t *f) { f->s1 = f->s2 = f->s3 = f->s4 = 0; 
 static inline void vcf_set_cutoff(cem3328_t *f, uint8_t c) { if (c != f->cut) { f->cut = c; f->dirty = 1; } }
 static inline void vcf_set_resonance(cem3328_t *f, uint8_t r)
 {
+#ifndef MIRAGE_EXACT
+    if (r != f->res) f->dirty = 1;   /* inv follows k */
+#endif
     f->res = r;
     f->k = f->tune->max_resonance * (mreal)r / MR(255.0);
 }
@@ -72,6 +76,10 @@ static void vcf_update(cem3328_t *f)
     f->G3 = f->G2 * f->G;
     f->G4 = f->G3 * f->G;
     f->a = MR(1.0) / (MR(1.0) + g);
+    f->aG = f->a * f->G;
+    f->aG2 = f->a * f->G2;
+    f->aG3 = f->a * f->G3;
+    f->inv = MR(1.0) / (MR(1.0) + f->k * f->G4);
     f->dirty = 0;
 }
 
@@ -81,8 +89,13 @@ static inline float vcf_process(cem3328_t *f, float in)
     if (f->dirty) vcf_update(f);
     x = (mreal)in * f->tune->input_gain;
     /* a linear estimate of the 4th stage's output, then a saturating input stage */
+#ifdef MIRAGE_EXACT
     S = f->G3 * f->s1 * f->a + f->G2 * f->s2 * f->a + f->G * f->s3 * f->a + f->s4 * f->a;
     y4est = (f->G4 * x + S) / (MR(1.0) + f->k * f->G4);
+#else
+    S = f->aG3 * f->s1 + f->aG2 * f->s2 + f->aG * f->s3 + f->a * f->s4;
+    y4est = (f->G4 * x + S) * f->inv;
+#endif
     u = m_tanh(x - f->k * y4est);
     v = (u - f->s1) * f->G; y = v + f->s1; f->s1 = y + v;
     v = (y - f->s2) * f->G; y = v + f->s2; f->s2 = y + v;

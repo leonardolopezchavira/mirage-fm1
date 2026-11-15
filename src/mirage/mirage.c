@@ -17,6 +17,16 @@ struct mirage_machine;
 
 #define OUTQ 64   /* analog samples made past the end of a render (one instruction makes at most a few) */
 
+/* The analog section: what the second core touches in split mode, and nothing else, so it is kept apart (on cache
+ * lines of its own: the padding around it in the machine) */
+typedef struct {
+    filter_tuning_t tuning;
+    cem3328_t vcf[8];
+    float chan_in[8];      /* the sample-and-hold outputs of the DOC's demultiplexer */
+    float mix;             /* the summed VCF outputs */
+    uint32_t noise;
+} analog_t;
+
 struct mirage_machine {
     /* the CPU first: cpu6809.h and via6522.h reach their state through the host */
     cpu6809_t cpu;
@@ -24,8 +34,9 @@ struct mirage_machine {
     acia6850_t acia;
     wd1772_t fdc;
     es5503_t doc;
-    filter_tuning_t tuning;
-    cem3328_t vcf[8];
+    uint8_t pad0[64];
+    analog_t an;
+    uint8_t pad1[64];
 
     const uint8_t *rom;
     uint8_t *sram;
@@ -48,9 +59,17 @@ struct mirage_machine {
 
     int doc_acc;           /* CPU cycles towards the next DOC frame */
     int analog_acc;        /* CPU cycles towards the next analog sample */
-    float chan_in[8];      /* the sample-and-hold outputs of the DOC's demultiplexer */
-    float mix;             /* the summed VCF outputs */
-    uint32_t noise;
+
+    /* split mode (mirage.h): the record being made */
+    uint8_t split, frame_new;
+    uint8_t codes[16];     /* the filters' DAC values, kept in both modes */
+    mirage_stream_t *rec;
+    int rec_steps;
+    uint32_t adc_stale;
+
+    int pend;              /* cycles run in this slice and not yet ticked (run_slice) */
+    int synced;            /* cycles of this slice ticked at I/O accesses */
+    uint8_t resched;       /* an I/O access: the next event may have moved */
 
     float *out;            /* the current render's output, and how far it has got */
     int out_n, out_len;
@@ -60,6 +79,7 @@ struct mirage_machine {
 
 static inline uint8_t cpu_bus_rd(struct mirage_machine *m, uint16_t a);
 static inline void cpu_bus_wr(struct mirage_machine *m, uint16_t a, uint8_t v);
+static void update_irqs(struct mirage_machine *m);
 _Static_assert(sizeof(struct mirage_machine) <= MIRAGE_MACHINE_MAX, "MIRAGE_MACHINE_MAX is too small");
 #include "cpu6809_impl.h"
 #include "via6522_impl.h"
@@ -110,17 +130,31 @@ static uint8_t doc_read_adc(struct mirage_machine *m)
     case 2: return m->pitch;
     case 3: return m->mod;
     default:
-        v = m_lroundf(128.0f + 300.0f * m->mix);
+        if (m->split) m->adc_stale++;   /* (the filters are on the other core: their output is a block old) */
+        v = m_lroundf(128.0f + 300.0f * m->an.mix);
         return (uint8_t)(v < 0 ? 0 : v > 255 ? 255 : v);
     }
 }
 
-static inline uint8_t cpu_bus_rd(struct mirage_machine *m, uint16_t a)
+static void tick(struct mirage_machine *m, int c);
+
+/* Before an I/O access: the peripherals brought up to this instruction's start (the cycles of the instructions run so
+ * far in this slice; no event falls among them, run_slice saw to that) */
+static inline void sync_io(struct mirage_machine *m)
+{
+    if (m->pend) {
+        tick(m, m->pend);
+        m->synced += m->pend;
+        m->pend = 0;
+    }
+    m->resched = 1;
+}
+
+/* the bus: memory inline (almost every access), I/O apart */
+static uint8_t bus_rd_io(struct mirage_machine *m, uint16_t a)
 {
     uint8_t v;
-    if (a < 0x8000) return m->sram[(size_t)m->bank << 15 | a];
-    if (a < 0xE000) return m->ram[a - 0x8000];
-    if (a >= 0xF000) return m->rom[a - 0xF000];
+    sync_io(m);
     if (a >= 0xEC00 && a <= 0xECFF) return doc_read(m, &m->doc, a & 0xFF);
     if ((a & 0xFF00) == 0xE200) { v = via_read(m, a & 0xF); update_irqs(m); return v; }
     if (a >= 0xE800 && a <= 0xE803) { v = fdc_read(&m->fdc, a & 3); update_irqs(m); return v; }
@@ -128,11 +162,17 @@ static inline uint8_t cpu_bus_rd(struct mirage_machine *m, uint16_t a)
     return 0xFF;
 }
 
-static inline void cpu_bus_wr(struct mirage_machine *m, uint16_t a, uint8_t v)
+static inline uint8_t cpu_bus_rd(struct mirage_machine *m, uint16_t a)
 {
-    if (a < 0x8000) { m->sram[(size_t)m->bank << 15 | a] = v; return; }
-    if (a < 0xE000) { m->ram[a - 0x8000] = v; return; }
-    if (a >= 0xF000) return;
+    if (a < 0x8000) return m->sram[(size_t)m->bank << 15 | a];
+    if (a < 0xE000) return m->ram[a - 0x8000];
+    if (a >= 0xF000) return m->rom[a - 0xF000];
+    return bus_rd_io(m, a);
+}
+
+static void bus_wr_io(struct mirage_machine *m, uint16_t a, uint8_t v)
+{
+    sync_io(m);
     if (a >= 0xEC00 && a <= 0xECFF) { doc_write(&m->doc, a & 0xFF, v); update_irqs(m); return; }
     if ((a & 0xFF00) == 0xE200) { via_write(m, a & 0xF, v); update_irqs(m); return; }
     if (a >= 0xE800 && a <= 0xE803) { fdc_write(&m->fdc, a & 3, v); update_irqs(m); return; }
@@ -143,10 +183,35 @@ static inline void cpu_bus_wr(struct mirage_machine *m, uint16_t a, uint8_t v)
         const int ch = a & 7, sel = (a >> 3) & 3;
         m->dac = v;
         if (sel != 3) {
-            if (!(sel & 2)) vcf_set_resonance(&m->vcf[ch], m->dac);
-            if (!(sel & 1)) vcf_set_cutoff(&m->vcf[ch], m->dac);
+            if (!(sel & 2)) m->codes[8 + ch] = m->dac;
+            if (!(sel & 1)) m->codes[ch] = m->dac;
+            if (!m->split) {
+                if (!(sel & 2)) vcf_set_resonance(&m->an.vcf[ch], m->dac);
+                if (!(sel & 1)) vcf_set_cutoff(&m->an.vcf[ch], m->dac);
+            } else if (m->rec) {
+                mirage_stream_t *r = m->rec;
+                const uint8_t what = (uint8_t)(ch | (!(sel & 2) ? 0x10 : 0) | (!(sel & 1) ? 0x20 : 0));
+                if (r->ndac < MIRAGE_STREAM_DACS) {
+                    r->dac_step[r->ndac] = (uint16_t)m->rec_steps;
+                    r->dac_ch[r->ndac] = what;
+                    r->dac_val[r->ndac] = m->dac;
+                    r->ndac++;
+                } else {   /* full: the last one takes the value (its timing within the block is lost) */
+                    r->dac_ch[MIRAGE_STREAM_DACS - 1] = what;
+                    r->dac_val[MIRAGE_STREAM_DACS - 1] = m->dac;
+                }
+            }
         }
     }
+}
+
+
+static inline void cpu_bus_wr(struct mirage_machine *m, uint16_t a, uint8_t v)
+{
+    if (a < 0x8000) { m->sram[(size_t)m->bank << 15 | a] = v; return; }
+    if (a < 0xE000) { m->ram[a - 0x8000] = v; return; }
+    if (a >= 0xF000) return;
+    bus_wr_io(m, a, v);
 }
 
 static void update_irqs(struct mirage_machine *m)
@@ -181,10 +246,50 @@ static void credit_segments(struct mirage_machine *m)
 }
 
 /* ------------------------------------------------------------------ the analog section */
+/* one step of the filters: chan_in (+ in7 at VCF 7) to the summed output */
+static inline float analog_compute(analog_t *an, float in7)
+{
+    float sum = 0;
+    int i;
+    /* a little analog noise at each filter's input: the real VCFs never sit at exactly zero, which is what lets
+     * them start self-oscillating during the boot-time tuning */
+#ifdef MIRAGE_EXACT
+    for (i = 0; i < 8; ++i) {
+        float n;
+        an->noise = an->noise * 1664525u + 1013904223u;
+        n = (float)((int32_t)an->noise >> 8) * (1.0f / 8388608.0f) * 1e-4f;
+        sum += vcf_process(&an->vcf[i], an->chan_in[i] + n + (i == 7 ? in7 : 0.0f));
+    }
+#else
+    an->noise = an->noise * 1664525u + 1013904223u;   /* one draw, a different rotation of it for each filter */
+    for (i = 0; i < 8; ++i) {
+        const uint32_t r = i ? (an->noise << (4 * i)) | (an->noise >> (32 - 4 * i)) : an->noise;
+        const float n = (float)((int32_t)r >> 8) * (1e-4f / 8388608.0f);
+        sum += vcf_process(&an->vcf[i], an->chan_in[i] + n + (i == 7 ? in7 : 0.0f));
+    }
+#endif
+    an->mix = sum;
+    return sum;
+}
+
 static void analog_step(struct mirage_machine *m)
 {
-    float in7 = 0, sum = 0, a;
-    int i, src;
+    float in7 = 0, sum, a;
+    int src;
+    if (m->split) {   /* recorded for the other core */
+        mirage_stream_t *r = m->rec;
+        if (r && m->rec_steps < MIRAGE_STREAM_STEPS) {
+            if (m->frame_new) {
+                int i;
+                r->frame_step[r->nframes] = (uint16_t)m->rec_steps;
+                for (i = 0; i < 8; ++i) r->frame_chan[r->nframes][i] = m->doc.chan[i];
+                r->nframes++;
+                m->frame_new = 0;
+            }
+            m->rec_steps++;
+        }
+        return;
+    }
     if (m->in_buf && m->in_pos < m->in_len) m->audio_in = m->in_buf[m->in_pos++];
 
     /* while sampling, the audio input feeds VCF 7, which the OS sets up as the anti-alias "input filter"
@@ -197,16 +302,7 @@ static void analog_step(struct mirage_machine *m)
         a = in7 < 0 ? -in7 : in7;
         if (a > m->in_level) m->in_level = a;
     }
-
-    /* a little analog noise at each filter's input: the real VCFs never sit at exactly zero, which is what lets
-     * them start self-oscillating during the boot-time tuning */
-    for (i = 0; i < 8; ++i) {
-        float n;
-        m->noise = m->noise * 1664525u + 1013904223u;
-        n = (float)((int32_t)m->noise >> 8) * (1.0f / 8388608.0f) * 1e-4f;
-        sum += vcf_process(&m->vcf[i], m->chan_in[i] + n + (i == 7 ? in7 : 0.0f));
-    }
-    m->mix = sum;
+    sum = analog_compute(&m->an, in7);
     if (m->out && m->out_n < m->out_len) m->out[m->out_n++] = sum;
     else if (m->outq_n < OUTQ) m->outq[m->outq_n++] = sum;
 }
@@ -218,18 +314,46 @@ static void tick(struct mirage_machine *m, int c)
     acia_tick(&m->acia, c);
     fdc_tick(&m->fdc, c);
 
-    m->doc_acc += c;
     frame_cpu = doc_frame_clocks(&m->doc) / 4;   /* 8 MHz DOC clocks to 2 MHz CPU cycles */
+#ifdef MIRAGE_EXACT
+    /* as mirage-remake: the frames the cycles hold, then the analog steps (a slice ends at each of them) */
+    m->doc_acc += c;
     while (m->doc_acc >= frame_cpu) {
         m->doc_acc -= frame_cpu;
         doc_frame(&m->doc);
-        for (i = 0; i < 8; ++i) m->chan_in[i] = (float)m->doc.chan[i] * (1.0f / 32768.0f);
+        if (m->split) m->frame_new = 1;
+        else
+            for (i = 0; i < 8; ++i) m->an.chan_in[i] = (float)m->doc.chan[i] * (1.0f / 32768.0f);
     }
     m->analog_acc += c;
     while (m->analog_acc >= MIRAGE_ANALOG_DIV) {
         m->analog_acc -= MIRAGE_ANALOG_DIV;
         analog_step(m);
     }
+#else
+    /* the frames and the analog steps in the order they fall in time (a slice can hold several of each) */
+    for (;;) {
+        const int to_frame = frame_cpu - m->doc_acc, to_step = MIRAGE_ANALOG_DIV - m->analog_acc;
+        if (to_frame <= to_step) {
+            if (to_frame > c) break;
+            c -= to_frame;
+            m->doc_acc = 0;
+            m->analog_acc += to_frame;
+            doc_frame(&m->doc);
+            if (m->split) m->frame_new = 1;
+            else
+                for (i = 0; i < 8; ++i) m->an.chan_in[i] = (float)m->doc.chan[i] * (1.0f / 32768.0f);
+        } else {
+            if (to_step > c) break;
+            c -= to_step;
+            m->analog_acc = 0;
+            m->doc_acc += to_step;
+            analog_step(m);
+        }
+    }
+    m->doc_acc += c;
+    m->analog_acc += c;
+#endif
     update_irqs(m);
 }
 
@@ -251,14 +375,12 @@ mirage_t *mirage_init(void *mem, const uint8_t *rom, uint8_t *sram)
     fdc_init(&m->fdc);
     m->doc.ram = sram;
     doc_reset(&m->doc);
-    tuning_defaults(&m->tuning);
-    for (i = 0; i < 8; ++i) {
-        vcf_init(&m->vcf[i], &m->tuning, (mreal)MIRAGE_ANALOG_HZ, kDetune[i]);
-    }
+    tuning_defaults(&m->an.tuning);
+    for (i = 0; i < 8; ++i) vcf_init(&m->an.vcf[i], &m->an.tuning, (mreal)MIRAGE_ANALOG_HZ, kDetune[i]);
     m->pitch = 0x80;
     m->mod = 0x00;
     m->last_pa = 0xFF;
-    m->noise = 12345u;
+    m->an.noise = 12345u;
     return m;
 }
 
@@ -269,18 +391,164 @@ void mirage_reset(mirage_t *m)
     acia_reset(&m->acia);
     fdc_reset(&m->fdc);
     doc_reset(&m->doc);
-    for (i = 0; i < 8; ++i) vcf_reset(&m->vcf[i]);
+    for (i = 0; i < 8; ++i) vcf_reset(&m->an.vcf[i]);
     m->bank = 0;
     m->doc_acc = m->analog_acc = 0;
     cpu_reset(m);
+}
+
+/* The CPU runs in slices: from one event to the next, the peripherals are left alone and ticked once at the end,
+ * instead of after every instruction. An event is whatever can change what the CPU sees, or the order of the DOC's
+ * frames and the analog section's steps: a VIA timer running out, the ACIA finishing a byte or taking the next one
+ * in, the disk controller's next step, the DOC's next frame (its oscillators can interrupt), the next analog step.
+ * The slice ends after the instruction that reaches its event, which is where the instruction-by-instruction
+ * machine (mirage-remake's) handled it: the same frames and steps, in the same order, from the same state. An I/O
+ * access in a slice first ticks the peripherals up to its instruction (sync_io), and the slice's end is worked out
+ * again after it. The CPU waiting in CWAI or SYNC for an interrupt that cannot come yet waits out the slice at once.
+ * Exact: tests/oracle.cpp holds it to mirage-remake, sample for sample. */
+static int next_event(const struct mirage_machine *m, int limit)
+{
+    int k = limit, d;
+    /* a timer's underflow is an event only when it raises an enabled interrupt that is not up already: otherwise
+     * the CPU sees it only by reading the VIA, and that read syncs first (timer 1 free-runs with its latch at 0 in
+     * OS 3.2, an underflow every 2 cycles) */
+    if ((m->via.ier & IFR_T1) && m->via.t1armed && !(m->via.ifr & IFR_T1) && (d = m->via.t1 + 1) < k) k = d;
+    if ((m->via.ier & IFR_T2) && m->via.t2armed && !(m->via.ifr & IFR_T2) && !(m->via.acr & 0x20)
+        && (d = m->via.t2 + 1) < k)
+        k = d;
+    if (m->acia.tx_busy > 0 && (m->acia.ctrl & 0x60) == 0x20 && m->acia.tx_busy < k) k = m->acia.tx_busy;   /* (its
+                                                                     * interrupt on: else only a read sees it) */
+    if (m->acia.rx_r != m->acia.rx_w && (d = m->acia.rx_wait > 0 ? m->acia.rx_wait : 1) < k) k = d;
+    if (m->fdc.op != FDC_NONE && !m->fdc.drq && (d = m->fdc.delay > 0 ? m->fdc.delay : 1) < k) k = d;
+#ifdef MIRAGE_EXACT
+    d = doc_frame_clocks(&m->doc) / 4 - m->doc_acc;
+    if (d < k) k = d;
+    d = MIRAGE_ANALOG_DIV - m->analog_acc;
+    if (d < k) k = d;
+#else
+    /* a frame is an event only when an oscillator running can interrupt (its halt sets the DOC's IRQ); otherwise a
+     * frame changes only what the CPU reads, and a read syncs first; the analog steps go in order in the tick */
+    {
+        int n;
+        for (n = 0; n < m->doc.osc_count; ++n)
+            if ((m->doc.osc[n].control & 0x09) == 0x08) {
+                d = doc_frame_clocks(&m->doc) / 4 - m->doc_acc;
+                if (d < k) k = d;
+                break;
+            }
+    }
+#endif
+    return k < 1 ? 1 : k;
+}
+
+static inline int cpu_can_wake(const struct mirage_machine *m)   /* cpu_step would do more than wait a cycle */
+{
+    const cpu6809_t *c = &m->cpu;
+    if (c->sync) return c->nmi_pending || c->firq || c->irq;
+    return (c->nmi_pending && c->nmi_armed) || (c->firq && !(c->cc & CC_F)) || (c->irq && !(c->cc & CC_I));
+}
+
+/* one slice, ending by limit cycles from now (or after the instruction that reaches it) */
+static void run_slice(struct mirage_machine *m, int limit)
+{
+    int budget = next_event(m, limit);
+    m->pend = 0;
+    m->synced = 0;
+    m->resched = 0;
+    while (m->pend < budget) {
+        if ((m->cpu.cwai || m->cpu.sync) && !cpu_can_wake(m)) {
+            const int k = budget - m->pend;
+            m->cpu.total += (uint64_t)k;
+            m->pend += k;
+            break;
+        }
+        m->pend += cpu_step(m);
+        if (m->resched) {   /* (from the I/O access's instruction's start, where pend counts from) */
+            m->resched = 0;
+            budget = next_event(m, limit - m->synced);
+        }
+    }
+    tick(m, m->pend);
+    m->pend = 0;
 }
 
 void mirage_run(mirage_t *m, uint32_t cycles)
 {
     const uint64_t end = m->cpu.total + cycles;
     m->out = 0;
-    while (m->cpu.total < end) tick(m, cpu_step(m));
+    while (m->cpu.total < end) {
+        const uint64_t left = end - m->cpu.total;
+        run_slice(m, left < 4096u ? (int)left : 4096);
+    }
     m->outq_n = 0;
+}
+
+void mirage_set_split(mirage_t *m, int on)
+{
+    int i;
+    if (!on && m->split)   /* the filters take the DAC values they missed */
+        for (i = 0; i < 8; ++i) {
+            vcf_set_cutoff(&m->an.vcf[i], m->codes[i]);
+            vcf_set_resonance(&m->an.vcf[i], m->codes[8 + i]);
+        }
+    if (on && !m->split) m->frame_new = 1;   /* (the first record starts with the DOC's outputs) */
+    m->split = (uint8_t)(on != 0);
+    m->rec = 0;
+}
+
+int mirage_render_split(mirage_t *m, mirage_stream_t *s, int n)
+{
+    int i;
+    if (n > MIRAGE_STREAM_STEPS - 4) n = MIRAGE_STREAM_STEPS - 4;
+    s->steps = s->nframes = s->ndac = 0;
+    for (i = 0; i < 16; ++i) s->codes[i] = m->codes[i];
+    m->rec = s;
+    m->rec_steps = 0;
+    m->out = 0;
+    while (m->rec_steps < n)   /* (a slice ends where the n-th step is taken, or the instruction after) */
+        run_slice(m, (n - m->rec_steps) * MIRAGE_ANALOG_DIV - m->analog_acc);
+    m->rec = 0;
+    s->steps = (uint16_t)m->rec_steps;
+    return m->rec_steps;
+}
+
+void mirage_analog_run(mirage_t *m, const mirage_stream_t *s, float *out)
+{
+    analog_t *an = &m->an;
+    int k, i, fi = 0, di = 0;
+    for (i = 0; i < 8; ++i) {
+        vcf_set_cutoff(&an->vcf[i], s->codes[i]);
+        vcf_set_resonance(&an->vcf[i], s->codes[8 + i]);
+    }
+    for (k = 0; k < s->steps; ++k) {
+        while (di < s->ndac && s->dac_step[di] <= k) {
+            const uint8_t ch = s->dac_ch[di] & 7;
+            if (s->dac_ch[di] & 0x10) vcf_set_resonance(&an->vcf[ch], s->dac_val[di]);
+            if (s->dac_ch[di] & 0x20) vcf_set_cutoff(&an->vcf[ch], s->dac_val[di]);
+            di++;
+        }
+        if (fi < s->nframes && s->frame_step[fi] <= k) {
+            for (i = 0; i < 8; ++i) an->chan_in[i] = (float)s->frame_chan[fi][i] * (1.0f / 32768.0f);
+            fi++;
+        }
+        out[k] = analog_compute(an, 0.0f);
+    }
+}
+
+uint32_t mirage_adc_stale(const mirage_t *m) { return m->adc_stale; }
+
+int mirage_take_pending(mirage_t *m, float *dst, int max)
+{
+    int i, n = m->outq_n < max ? m->outq_n : max;
+    for (i = 0; i < n; ++i) dst[i] = m->outq[i];
+    m->outq_n = 0;
+    return n;
+}
+
+void mirage_put_pending(mirage_t *m, const float *src, int n)
+{
+    int i;
+    for (i = 0; i < n && m->outq_n < OUTQ; ++i) m->outq[m->outq_n++] = src[i];
 }
 
 void mirage_render(mirage_t *m, float *out, int n, const float *in)
@@ -296,7 +564,8 @@ void mirage_render(mirage_t *m, float *out, int n, const float *in)
     m->out = out;
     m->out_n = k;
     m->out_len = n;
-    while (m->out_n < n) tick(m, cpu_step(m));
+    while (m->out_n < n)   /* (a wait ends where the render's last sample is made) */
+        run_slice(m, (n - m->out_n) * MIRAGE_ANALOG_DIV - m->analog_acc);
     m->out = 0;
     m->in_buf = 0;
 }
@@ -348,6 +617,7 @@ float mirage_take_input_level(mirage_t *m)
     return v;
 }
 
+int mirage_doc_oscillators(const mirage_t *m) { return m->doc.osc_count; }
 uint64_t mirage_cycles(const mirage_t *m) { return m->cpu.total; }
 uint16_t mirage_pc(const mirage_t *m) { return m->cpu.pc; }
 uint8_t *mirage_main_ram(mirage_t *m) { return m->ram; }
@@ -370,7 +640,8 @@ void mirage_snapshot_load(mirage_t *m, const void *src)
     m->fdc.disk = disk;
     m->acia.on_tx = tx;
     m->acia.tx_ctx = tx_ctx;
-    for (i = 0; i < 8; ++i) m->vcf[i].tune = &m->tuning;
+    for (i = 0; i < 8; ++i) m->an.vcf[i].tune = &m->an.tuning;
+    m->rec = 0;
     m->out = 0;
     m->in_buf = 0;
 }

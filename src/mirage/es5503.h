@@ -14,6 +14,10 @@ typedef struct {
     uint8_t wtsize_sel, res;
     uint32_t acc;
     uint8_t irqpend;
+    /* worked out when the registers are written, not at every frame: */
+    uint8_t resshift;     /* kResShifts[res] - wtsize_sel */
+    uint32_t base;        /* wtptr & kWaveMasks[wtsize_sel] */
+    uint32_t sizemask;    /* kAccMasks[wtsize_sel] */
 } doc_osc_t;
 
 typedef struct {
@@ -33,6 +37,13 @@ static const uint32_t kAccMasks[8] = {0xFF, 0x1FF, 0x3FF, 0x7FF, 0xFFF, 0x1FFF, 
 static const int kResShifts[8] = {9, 10, 11, 12, 13, 14, 15, 16};
 enum { MODE_FREE = 0, MODE_ONESHOT = 1, MODE_SYNCAM = 2, MODE_SWAP = 3 };
 
+static inline void doc_osc_cache(doc_osc_t *o)
+{
+    o->resshift = (uint8_t)(kResShifts[o->res] - o->wtsize_sel);
+    o->base = o->wtptr & kWaveMasks[o->wtsize_sel];
+    o->sizemask = kAccMasks[o->wtsize_sel];
+}
+
 static inline int doc_frame_clocks(const es5503_t *d) { return (d->osc_count + 2) * 8; }   /* 8 MHz clocks */
 
 static void doc_reset(es5503_t *d)
@@ -44,6 +55,7 @@ static void doc_reset(es5503_t *d)
         o->wtsize = 256;
         o->control = 1;
         o->data = 0x80;
+        doc_osc_cache(o);
     }
     d->osc_count = 1;
     d->reg_e0 = 0xFF;
@@ -100,9 +112,9 @@ static void doc_frame(es5503_t *d)
         int resshift, mode;
         uint8_t raw;
         if (o->control & 1) continue;
-        wtptr = o->wtptr & kWaveMasks[o->wtsize_sel];
-        resshift = kResShifts[o->res] - o->wtsize_sel;
-        sizemask = kAccMasks[o->wtsize_sel];
+        wtptr = o->base;
+        resshift = o->resshift;
+        sizemask = o->sizemask;
         mode = (o->control >> 1) & 3;
         acc = o->acc;
 
@@ -177,7 +189,7 @@ static void doc_write(es5503_t *d, int reg, uint8_t v)
         case 0x20: o->freq = (uint16_t)((o->freq & 0x00FF) | (v << 8)); break;
         case 0x40: o->vol = v; break;
         case 0x60: break;
-        case 0x80: o->wtptr = (o->wtptr & 0x10000) | (uint32_t)(v << 8); break;
+        case 0x80: o->wtptr = (o->wtptr & 0x10000) | (uint32_t)(v << 8); doc_osc_cache(o); break;
         case 0xA0:
             if ((o->control & 1) && !(v & 1)) o->acc = 0;
             if (!(o->control & 1) && (v & 1) && ((v >> 1) & 1)) doc_halt(d, n, 0, &o->acc, kResShifts[o->res], v);
@@ -188,6 +200,7 @@ static void doc_write(es5503_t *d, int reg, uint8_t v)
             o->wtsize_sel = (v >> 3) & 7;
             o->wtsize = kWaveSizes[o->wtsize_sel];
             o->res = v & 7;
+            doc_osc_cache(o);
             break;
         }
         return;

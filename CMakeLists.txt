@@ -25,6 +25,7 @@ target_compile_definitions(mirage_core_double PUBLIC MIRAGE_DOUBLE)
 target_link_libraries(mirage_core_double PUBLIC m)
 
 add_executable(mirage_cli tools/mirage_cli.c)
+target_include_directories(mirage_cli PRIVATE tools)
 target_link_libraries(mirage_cli PRIVATE mirage_core)
 
 add_executable(mirage_core_test tests/core_test.c)
@@ -34,6 +35,15 @@ enable_testing()
 set(ROM ${CMAKE_SOURCE_DIR}/data/rom/mirage.bin)
 set(OS32 ${CMAKE_SOURCE_DIR}/data/disks/os32.img)
 add_test(NAME core COMMAND mirage_core_test ${ROM} ${OS32})
+
+find_package(Threads REQUIRED)
+add_executable(mirage_split_test tests/split_test.c)
+target_link_libraries(mirage_split_test PRIVATE mirage_core Threads::Threads)
+add_test(NAME split COMMAND mirage_split_test ${ROM} ${OS32})
+
+add_executable(mirage_bench tools/mirage_bench.c)
+target_include_directories(mirage_bench PRIVATE tools)
+target_link_libraries(mirage_bench PRIVATE mirage_core)
 
 # the built-in disk: packed by tools/pack_disk.py, decoded by src/mirage/packed_disk.c
 find_package(Python3 COMPONENTS Interpreter)

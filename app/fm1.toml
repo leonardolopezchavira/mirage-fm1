@@ -8,6 +8,8 @@ o2 = ["mirage/mirage.c", "mirage/mirage_engine.c", "mirage/packed_disk.c"]
 o2_cflags = ["-DMIRAGE_FASTMATH"]
 include = ["mirage", "data"]
 words = "words.tsv"
+cpu2 = true                     # the second core plays the analog section (src/mirage split mode)
+cpu2_fallback = true            # and if it fails: one core until power-off, not a restart
 ble = true                      # Bluetooth MIDI in
 # the site and firmware.json
 tagline = "an Ensoniq Mirage for the FM-1, running Ensoniq's own OS"
