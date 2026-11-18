@@ -25,4 +25,6 @@ jobs:
       test: |
         python3 fm1/base/tools/build.py app --host
         app/build/host/mirage_host app/tests/basic.txt app/build/host
+        app/build/host/mirage_host app/tests/safe.txt app/build/host
+        app/build/host/mirage_host app/tests/overload.txt app/build/host
       tests-block: false

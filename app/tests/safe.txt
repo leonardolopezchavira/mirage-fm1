@@ -1,0 +1,17 @@
+# The safe start: HOME held as the FM-1 starts keeps the machine off, whatever it would do.
+#   app/build/host/mirage_host app/tests/safe.txt app/build/host
+press HOME
+wait 2000
+release HOME
+expect start 2
+shot safe.png
+wait 7000
+expect booted 0
+expect start 2
+expect guard 0
+# the keys do nothing to it, and nothing breaks
+key 7 down 100
+wait 300
+key 7 up
+wait 300
+expect booted 0

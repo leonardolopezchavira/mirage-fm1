@@ -18,7 +18,7 @@ Early: the scaffold and the emulator core. See [docs/PLAN.md](docs/PLAN.md) for 
 | Emulator core in C (`src/mirage/`) | **done**, bit-exact with mirage-remake |
 | Built-in OS 3.2 disk (piano, voices, strings), packed for the FM-1's flash | **done** |
 | FM-1 app: keys, MIDI in, the display, the keypad, K1/K2 editing | first pass, runs in the host simulator |
-| On the FM-1 itself | not tested yet: the CPU load is the next thing to measure |
+| On the FM-1 itself | 0.1.0 measured 228 % of the CPU; 0.3.0 adds a CPU-load guard and a safe start. Read [docs/SAFETY.md](docs/SAFETY.md) before installing |
 
 ## How it works
 

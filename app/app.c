@@ -9,6 +9,10 @@
  *     HOME is CANCEL.
  * The built-in disk is OS 3.2's, packed in the firmware (app/data/os32_disk.h, tools/pack_disk.py) and read-only
  * for now: saving to a sound slot comes later (docs/PLAN.md).
+ * Safety (docs/SAFETY.md): the machine starts 1.5 s after the screen, so USB and the platform's power-on holds come
+ * first; HOME held then is a SAFE START, with the machine never run; and the CPU-load guard (guard.h) keeps the
+ * machine to its share of the audio interrupt's time, pausing it and then turning the sound off when it cannot keep
+ * up. The firmware writes nothing to the flash of its own.
  * Part of the unity build (device/unity.c, host/plat_host.c), after the platform: gfx.c and announce.c are in
  * scope. */
 #define MIRAGE_FASTMATH   /* as the o2 units (fm1.toml o2_cflags): fm1-base's fastmath.h, no libm */
@@ -17,6 +21,7 @@
 #include "packed_disk.h"
 #include "mirage_rom.h"
 #include "os32_disk.h"
+#include "guard.h"
 
 #ifdef PLAT_HOST
 #define DISK_TURBO 8   /* the simulator: fast loading, as mirage-remake */
@@ -30,7 +35,21 @@ static uint64_t machine_mem[MIRAGE_MACHINE_MAX / 8u] PLAT_POOL;
 static mirage_engine_t eng PLAT_POOL;
 static packed_disk_t disk PLAT_POOL;
 static mirage_t *mx;
-static volatile uint8_t ok;        /* the machine is up */
+static volatile uint8_t ok;        /* the machine runs (set by the main loop, START_MS after the screen) */
+static uint8_t ready;              /* app_init made it */
+
+/* the start: the machine waits START_MS after the first frame; HOME held in that time is a safe start, the machine
+ * never run (a way back in, whatever the emulation does) */
+#define START_MS 1500u
+enum { START_WAIT, START_RUN, START_SAFE };
+static volatile uint8_t start_state;
+static uint32_t start_t0;
+
+/* the CPU-load guard (guard.h), the audio interrupt's; the main loop reads its state */
+static mguard_t guard;
+#ifdef PLAT_HOST
+static uint32_t sim_load_pct;      /* the simulator's "load N": the machine's blocks cost N % of a block more */
+#endif
 
 /* the second core: it plays the last block's record through the filters (mirage_engine_job) while this one runs the
  * machine; how long it took, in plat_ticks24 ticks, for the load shown */
@@ -78,16 +97,42 @@ static void midi_in(void)                 /* audio interrupt: USB-MIDI packets t
     }
 }
 
+static void notes_off(void)                /* audio interrupt: all notes off on every channel, into the machine */
+{
+    uint8_t c;
+    for (c = 0; c < 16u; c++) {
+        mirage_midi_in(mx, (uint8_t)(0xB0u | c));
+        mirage_midi_in(mx, 123);
+        mirage_midi_in(mx, 0);
+    }
+}
+
 void app_render(int32_t *lr, uint32_t n, uint32_t master_q12)
 {
     static float mono[APP_BLOCK];
     static float gain_now;
     const float gain = (float)master_q12 / 4096.0f * 8300000.0f;
-    uint32_t i, done = 0, held, ch;
-    int d, s;
+    uint32_t i, held, ch, t0, used, budget;
+    int d, s, port;
+    if (n > APP_BLOCK) n = APP_BLOCK;              /* (it is APP_BLOCK: fm1-base renders a half per call) */
+    budget = n * (PLAT_TICKS_PER_US * 1000000u / 44118u);
     if (!ok) {
         for (i = 0; i < 2u * n; i++) lr[i] = 0;
         return;
+    }
+    if (!mguard_begin(&guard, budget, plat_ms())) {   /* no time for the machine: silence, the machine paused */
+        if (guard.state != MGUARD_RUN) {               /* tripped: what comes in meanwhile is dropped */
+            while (plat_midi_in(&ch, &port)) {}
+            ring_r = ring_w;
+        }
+        for (i = 0; i < 2u * n; i++) lr[i] = 0;
+        load_c0 = (uint16_t)(load_c0 * 15u / 16u);
+        load_c1 = (uint16_t)(load_c1 * 15u / 16u);
+        return;
+    }
+    if (guard.resumed) {                               /* back after a trip: no note left held */
+        guard.resumed = 0;
+        notes_off();
     }
     midi_in();
     while (ring_r != ring_w) {
@@ -100,22 +145,23 @@ void app_render(int32_t *lr, uint32_t n, uint32_t master_q12)
             if (ch >> i & 1u) mirage_set_key(mx, (int)((i / 8u) << 4 | (i % 8u)), (int)(held >> i & 1u));
         panel_applied = held;
     }
-    while (done < n) {
-        const uint32_t k = n - done < APP_BLOCK ? n - done : APP_BLOCK;
-        const uint32_t t0 = plat_ticks24(), budget = k * (PLAT_TICKS_PER_US * 1000000u / 44118u);
-        c1_ticks = 0;
-        mirage_engine_process(&eng, mono, (int)k, 0);
-        /* the loads, smoothed over about 16 blocks */
-        load_c0 = (uint16_t)((load_c0 * 15u + (plat_ticks24() - t0) * 1000u / budget + 8u) / 16u);
-        load_c1 = (uint16_t)((load_c1 * 15u + c1_ticks * 1000u / budget + 8u) / 16u);
-        for (i = 0; i < k; i++) {
-            float v;
-            gain_now += (gain - gain_now) * 0.004f;   /* MASTER glides: no click at a block's edge */
-            v = mono[i] * gain_now;
-            lr[2u * (done + i)] = (int32_t)v;
-            lr[2u * (done + i) + 1u] = (int32_t)v;
-        }
-        done += k;
+    t0 = plat_ticks24();
+    c1_ticks = 0;
+    mirage_engine_process(&eng, mono, (int)n, 0);
+    used = plat_ticks24() - t0;
+#ifdef PLAT_HOST
+    used += (uint32_t)((uint64_t)budget * sim_load_pct / 100u);
+#endif
+    mguard_end(&guard, used);
+    /* the loads, smoothed over about 16 blocks */
+    load_c0 = (uint16_t)((load_c0 * 15u + used * 1000u / budget + 8u) / 16u);
+    load_c1 = (uint16_t)((load_c1 * 15u + c1_ticks * 1000u / budget + 8u) / 16u);
+    for (i = 0; i < n; i++) {
+        float v;
+        gain_now += (gain - gain_now) * 0.004f;       /* MASTER glides: no click at a block's edge */
+        v = mono[i] * gain_now;
+        lr[2u * i] = (int32_t)v;
+        lr[2u * i + 1u] = (int32_t)v;
     }
     for (d = 0; d < 2; d++) {
         seg_bits[d] = mirage_display(mx, d);
@@ -145,7 +191,7 @@ void app_init(void)
     eng.disk_turbo = DISK_TURBO;
     two_cores = plat_cpu2_set(1) == 0;
     if (two_cores) mirage_engine_set_core2(&eng, &core2);
-    ok = 1;                                      /* the OS boots in the render, as at power-on */
+    ready = 1;                                   /* the OS boots in the render once the main loop starts it */
 }
 
 /* ------------------------------------------------------------------ the front panel */
@@ -202,6 +248,7 @@ static struct {
     uint8_t seen_bits[2], seen_motor, redraw;
     uint16_t seen_lvl[2][8];
     uint32_t seen_cpu;
+    uint8_t seen_guard;
 } ui;
 
 static void text_cat(char *d, const char *s)
@@ -366,7 +413,7 @@ static void input(void)
             ui.keypad = (uint8_t)!ui.keypad;
             app_say("KEYPAD", ui.keypad ? "ON" : "OFF");
         } else if (k == B_HOME) {
-            press(MIRAGE_CANCEL);
+            if (start_state == START_RUN) press(MIRAGE_CANCEL);   /* (before: the safe start's key) */
         }
     }
     if ((e = plat_enc(EN_K1)) != 0) {   /* a parameter number, sent when K1 rests */
@@ -415,6 +462,14 @@ static void digit(int32_t x, int32_t y, int d)
     cv_rect(x + w + 6, y + h - t, t, t, led(l[7]));                   /* dp */
 }
 
+/* the header's line when the machine is not simply playing: 0 when it is */
+static const char *banner(void)
+{
+    if (start_state == START_WAIT) return "HOLD HOME NOW: SAFE START";
+    if (start_state == START_SAFE) return "SAFE START: SOUND OFF";
+    return mguard_text(&guard);
+}
+
 static void draw(void)
 {
     static const uint8_t WK[16] = PLAT_WHITE_KEYS, BK[11] = PLAT_BLACK_KEYS;
@@ -425,6 +480,8 @@ static void draw(void)
     if (now < ui.msg_until) {
         const int32_t x = cv_text(10, 6, &FONT_B, ui.msg[0], C_WHITE);
         cv_text(x + 8, 6, &FONT_B, ui.msg[1], C_HI);
+    } else if (banner()) {
+        cv_text(10, 10, &FONT_XS, banner(), start_state == START_WAIT ? C_GRAY : RGB(255, 60, 40));
     } else {
         int32_t x = cv_text(10, 6, &FONT_B, APP_NAME, C_WHITE);
         x = cv_text(x + 10, 10, &FONT_XS, "DISK", motor_on ? RGB(255, 60, 40) : C_DIM);
@@ -470,6 +527,23 @@ static void draw(void)
     cv_blit(0, 166);
 }
 
+/* main loop: the machine starts START_MS after the first frame, unless HOME was held in that time */
+static void start_poll(uint32_t now)
+{
+    if (start_state != START_WAIT) return;
+    if (!start_t0) start_t0 = now ? now : 1u;
+    if (plat_buttons() >> B_HOME & 1u) {
+        start_state = START_SAFE;
+        ui.redraw = 1;
+        return;
+    }
+    if (now - start_t0 >= START_MS) {
+        start_state = START_RUN;
+        ok = ready;
+        ui.redraw = 1;
+    }
+}
+
 void app_ui_init(void)
 {
     touch_on(1);
@@ -482,8 +556,10 @@ void app_frame(void)
 {
     uint32_t now = plat_ms(), cpu = plat_cpu_pct();
     int d, s;
+    start_poll(now);
     input();
     speak();
+    if (guard.state != ui.seen_guard) { ui.seen_guard = guard.state; ui.redraw = 1; }
     for (d = 0; d < 2; d++) {   /* the display changed: draw it again */
         if (seg_bits[d] != ui.seen_bits[d]) { ui.seen_bits[d] = seg_bits[d]; ui.redraw = 1; }
         for (s = 0; s < 8; s++) {
@@ -515,7 +591,22 @@ int app_expect(const char *what, int *got)
     else if (!strcmp(what, "booted")) *got = ok && mx && mirage_cycles(mx) > 5u * MIRAGE_CPU_HZ && !motor_on;
     else if (!strcmp(what, "split")) *got = eng.split;
     else if (!strcmp(what, "jobs")) *got = (int)eng.jobs;
+    else if (!strcmp(what, "guard")) *got = guard.state;          /* MGUARD_RUN 0, _TRIPPED 1, _STOPPED 2 */
+    else if (!strcmp(what, "trips")) *got = guard.trips;
+    else if (!strcmp(what, "skipped")) *got = (int)guard.skipped_total;
+    else if (!strcmp(what, "start")) *got = start_state;          /* START_WAIT 0, _RUN 1, _SAFE 2 */
     else return 0;
     return 1;
+}
+
+/* "load N": the machine's blocks cost N % of a block more from now on (0: as they are), to drive the guard */
+int app_host_cmd(const char *cmd, const char *a, const char *b, const char *c, const char *d)
+{
+    (void)b; (void)c; (void)d;
+    if (!strcmp(cmd, "load")) {
+        sim_load_pct = (uint32_t)atoi(a);
+        return 1;
+    }
+    return 0;
 }
 #endif

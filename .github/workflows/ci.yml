@@ -40,6 +40,8 @@ jobs:
         run: |
           python3 fm1/base/tools/build.py app --host
           app/build/host/mirage_host app/tests/basic.txt app/build/host
+          app/build/host/mirage_host app/tests/safe.txt app/build/host
+          app/build/host/mirage_host app/tests/overload.txt app/build/host
       - uses: actions/upload-artifact@v4
         with:
           name: simulator-screens

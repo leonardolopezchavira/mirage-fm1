@@ -41,6 +41,10 @@ add_executable(mirage_split_test tests/split_test.c)
 target_link_libraries(mirage_split_test PRIVATE mirage_core Threads::Threads)
 add_test(NAME split COMMAND mirage_split_test ${ROM} ${OS32})
 
+# the firmware's CPU-load guard (app/guard.h), on its own
+add_executable(mirage_guard_test tests/guard_test.c)
+add_test(NAME guard COMMAND mirage_guard_test)
+
 add_executable(mirage_bench tools/mirage_bench.c)
 target_include_directories(mirage_bench PRIVATE tools)
 target_link_libraries(mirage_bench PRIVATE mirage_core)

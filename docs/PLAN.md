@@ -17,7 +17,7 @@ the short version that lives with the code.
 | --- | --- | --- | --- |
 | 0 | Scaffold: fm1-base, fm1.toml, licences, CI, host simulator | an app builds, installs and boots on the FM-1 | **builds** (CI's `packages` artifact); on hardware: to test |
 | 1 | C core: src/emu in C99, no allocation, float on the FM-1 | bit-exact with mirage-remake (double build) | **done**: `tests/oracle.cpp` |
-| 2 | Performance on the FM-1: both cores measured | the filter rate and core split fixed | next |
+| 2 | Performance on the FM-1: both cores measured | the filter rate and core split fixed | 0.2.0 on the desktop; 0.3.0 adds the load guard and safe start ([SAFETY.md](SAFETY.md)); the FM-1 reading is next |
 | 3 | Storage: sound slots, virtual disk, boot snapshot, instant disk | LOAD and SAVE from flash; boot under 1 s | |
 | 4 | UI: play screen, keypad, quick edit, disk and system pages | playable and editable from the FM-1 alone | first pass in `app/app.c` |
 | 5 | Browser disk drive and installer | any factory disk plays through the FM-1 | |

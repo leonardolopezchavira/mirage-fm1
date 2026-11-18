@@ -1,0 +1,42 @@
+# The CPU-load guard (app/guard.h) under 0.1.0's load: the machine paused, tried again, then off until power-off;
+# and a load that passes: the sound back.
+#   app/build/host/mirage_host app/tests/overload.txt app/build/host
+wait 9000
+expect start 1
+expect booted 1
+expect guard 0
+expect trips 0
+# a heavy load it can carry (the machine at its full block's time): some blocks skipped, no trip
+load 100
+wait 5000
+expect guard 0
+expect trips 0
+expect skipped >100
+load 0
+# 0.1.0 measured 228 % on the FM-1: its blocks cost 2.28 blocks' time (the host's own cost is next to nothing)
+load 228
+wait 2000
+expect guard 1
+expect trips 1
+shot overload.png
+# the load passes before the retry: the machine plays again, its notes cleared
+load 0
+wait 5000
+expect guard 0
+expect trips 1
+wav back.wav
+key 7 down 100
+wait 600
+key 7 up
+wait 300
+wavstop
+expect peak_db_min -32
+# and when it stays: paused twice more, then off for good
+load 228
+wait 15000
+expect guard 2
+expect trips 3
+load 0
+wait 8000
+expect guard 2
+shot stopped.png
